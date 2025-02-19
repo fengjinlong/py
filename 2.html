@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Doge Pixel Art</title>
+    <style>
+      #container {
+        display: flex;
+        flex-wrap: wrap;
+      }
+      .pixel {
+        width: 1px;
+        height: 1px;
+      }
+    </style>
+  </head>
+  <body>
+    <input type="file" id="imageUpload" />
+    <div id="container"></div>
+
+    <script>
+      document
+        .getElementById("imageUpload")
+        .addEventListener("change", function (event) {
+          const file = event.target.files[0];
+          if (file) {
+            const img = new Image();
+            img.onload = function () {
+              processImage(img);
+            };
+            img.src = URL.createObjectURL(file);
+          }
+        });
+
+      function processImage(img) {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const container = document.getElementById("container");
+        container.innerHTML = ""; // Clear previous pixels
+
+        for (let y = 0; y < imageData.height; y++) {
+          for (let x = 0; x < imageData.width; x++) {
+            const index = (y * imageData.width + x) * 4;
+            const r = imageData.data[index];
+            const g = imageData.data[index + 1];
+            const b = imageData.data[index + 2];
+
+            const pixelDiv = document.createElement("div");
+            pixelDiv.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+            container.appendChild(pixelDiv);
+          }
+        }
+
+        // Adjust size of each pixel
+        adjustPixelSize(container, canvas.width, canvas.height);
+      }
+
+      function adjustPixelSize(container, width, height) {
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+
+        const scale = Math.min(
+          containerWidth / width,
+          containerHeight / height
+        );
+        const pixelSize = scale;
+
+        Array.from(container.children).forEach((pixel) => {
+          pixel.style.width = `${pixelSize}px`;
+          pixel.style.height = `${pixelSize}px`;
+        });
+      }
+
+      // Add event listener for window resize
+      window.addEventListener("resize", () => {
+        adjustPixelSize(
+          document.getElementById("container"),
+          canvas.width,
+          canvas.height
+        );
+      });
+    </script>
+  </body>
+</html>
