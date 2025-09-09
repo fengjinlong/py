@@ -124,7 +124,7 @@ def effect_ratio(data1):
 effect_ratio(data1)
 
 
-def huatu(time,close,diff,filename="figure.png"):
+def huatu(time,close,diff):
     time = pd.to_datetime(time)
 
     # 创建图形和主轴
@@ -155,15 +155,15 @@ def huatu(time,close,diff,filename="figure.png"):
     # 显示图形
     plt.title('Close and Diff Over Time')
     plt.tight_layout()
-    plt.savefig(filename, dpi=200, bbox_inches='tight')
+    plt.savefig('figure.png', dpi=200, bbox_inches='tight')
     plt.close(fig)
 
 
 
 
-huatu(data1["candle_begin_time"],data1["close"],data1["diff-10"], "diff_10_percent.png")
-huatu(data1["candle_begin_time"],data1["close"],data1["diff-30"], "diff_30_percent.png")
-huatu(data1["candle_begin_time"],data1["close"],data1["diff-50"], "diff_50_percent.png")
+huatu(data1['candle_begin_time'],data1['close'],data1['diff-10'])
+# huatu(data1['candle_begin_time'],data1['close'],data1['diff-30'])
+# huatu(data1['candle_begin_time'],data1['close'],data1['diff-50'])
 
 
 exit()
