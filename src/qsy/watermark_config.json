@@ -1,0 +1,15 @@
+{
+  "watermark_regions": [
+    {
+      "name": "右下角水印",
+      "coordinates": [1296, 816, 1635, 915],
+      "enabled": true
+    },
+    {
+      "name": "左上角水印",
+      "coordinates": [17, 14, 155, 74],
+      "enabled": true
+    }
+  
+  ]
+}
