@@ -1,0 +1,37 @@
+{
+  "upscale_factor": 2,
+  "enhancement_mode": "all",
+  "save_quality": 95,
+  "algorithms": {
+    "upscale": "esrgan_sim",
+    "enhance": "advanced"
+  },
+  "enhancement_params": {
+    "sharpness_radius": 2,
+    "sharpness_percent": 150,
+    "sharpness_threshold": 3,
+    "contrast_factor": 1.2,
+    "color_factor": 1.1,
+    "brightness_factor": 1.05
+  },
+  "esrgan_params": {
+    "sharpening_kernel": [
+      [
+        -1,
+        -1,
+        -1
+      ],
+      [
+        -1,
+        9,
+        -1
+      ],
+      [
+        -1,
+        -1,
+        -1
+      ]
+    ],
+    "blend_ratio": 0.3
+  }
+}
