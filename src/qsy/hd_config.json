@@ -1,7 +1,7 @@
 {
   "upscale_factor": 1,
   "enhancement_mode": "all",
-  "save_quality": 80,
+  "save_quality": 30,
   "algorithms": {
     "upscale": "esrgan_sim",
     "enhance": "advanced"
