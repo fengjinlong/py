@@ -1,7 +1,7 @@
 {
-  "upscale_factor": 2,
+  "upscale_factor": 1,
   "enhancement_mode": "all",
-  "save_quality": 95,
+  "save_quality": 80,
   "algorithms": {
     "upscale": "esrgan_sim",
     "enhance": "advanced"
@@ -15,23 +15,21 @@
     "brightness_factor": 1.05
   },
   "esrgan_params": {
-    "sharpening_kernel": [
-      [
-        -1,
-        -1,
-        -1
-      ],
-      [
-        -1,
-        9,
-        -1
-      ],
-      [
-        -1,
-        -1,
-        -1
-      ]
-    ],
+    "sharpening_kernel": [[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]],
     "blend_ratio": 0.3
+  },
+  "bilateral_filter": {
+    "d": 20,
+    "sigma_color": 80,
+    "sigma_space": 80
+  },
+  "denoising_params": {
+    "h": 10,
+    "h_color": 10,
+    "template_window_size": 7,
+    "search_window_size": 21
+  },
+  "laplacian_sharpening": {
+    "alpha": 0.3
   }
 }

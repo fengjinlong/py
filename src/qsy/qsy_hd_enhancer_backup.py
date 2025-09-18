@@ -42,22 +42,51 @@ class ImageHDEnhancer:
     
     def load_config(self) -> Dict:
         """加载高清化配置"""
-        if not self.config_file.exists():
-            logger.error(f"配置文件不存在: {self.config_file}")
-            logger.error("请确保 hd_config.json 文件存在并包含正确的配置")
-            raise FileNotFoundError(f"配置文件不存在: {self.config_file}")
+        default_config = {
+            "upscale_factor": 2,
+            "enhancement_mode": "all",  # "upscale", "enhance", "all"
+            "save_quality": 95,
+            "algorithms": {
+                "upscale": "esrgan_sim",  # "bicubic", "lanczos", "esrgan_sim"
+                "enhance": "advanced"     # "basic", "advanced", "super"
+            },
+            "enhancement_params": {
+                "sharpness_radius": 2,
+                "sharpness_percent": 150,
+                "sharpness_threshold": 3,
+                "contrast_factor": 1.2,
+                "color_factor": 1.1,
+                "brightness_factor": 1.05
+            },
+            "esrgan_params": {
+                "sharpening_kernel": [[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]],
+                "blend_ratio": 0.3
+            }
+        }
         
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    # 合并默认配置和用户配置
+                    for key, value in default_config.items():
+                        if key not in config:
+                            config[key] = value
+                    return config
+            except Exception as e:
+                logger.warning(f"配置文件加载失败: {e}，使用默认配置")
+        
+        # 保存默认配置
+        self.save_config(default_config)
+        return default_config
+    
+    def save_config(self, config: Dict):
+        """保存配置到文件"""
         try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                logger.info(f"成功加载配置文件: {self.config_file}")
-                return config
-        except json.JSONDecodeError as e:
-            logger.error(f"配置文件格式错误: {e}")
-            raise ValueError(f"配置文件格式错误: {e}")
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"配置文件加载失败: {e}")
-            raise Exception(f"配置文件加载失败: {e}")
+            logger.error(f"保存配置文件失败: {e}")
     
     def upscale_bicubic(self, img: np.ndarray, factor: float) -> np.ndarray:
         """使用双三次插值进行放大"""
@@ -171,7 +200,6 @@ class ImageHDEnhancer:
                 elif algorithm == "esrgan_sim":
                     processed = self.upscale_esrgan_simulation(img, factor)
                 else:
-                    logger.warning(f"未知的放大算法: {algorithm}，使用双三次插值")
                     processed = self.upscale_bicubic(img, factor)
                     
             elif mode == "enhance":
@@ -184,7 +212,6 @@ class ImageHDEnhancer:
                 elif algorithm == "super":
                     processed = self.enhance_super(img)
                 else:
-                    logger.warning(f"未知的增强算法: {algorithm}，使用高级增强")
                     processed = self.enhance_advanced(img)
                     
             elif mode == "all":
@@ -198,7 +225,6 @@ class ImageHDEnhancer:
                 elif upscale_algorithm == "esrgan_sim":
                     upscaled = self.upscale_esrgan_simulation(img, factor)
                 else:
-                    logger.warning(f"未知的放大算法: {upscale_algorithm}，使用ESRGAN模拟")
                     upscaled = self.upscale_esrgan_simulation(img, factor)
                 
                 # 再增强
@@ -210,10 +236,8 @@ class ImageHDEnhancer:
                 elif enhance_algorithm == "super":
                     processed = self.enhance_super(upscaled)
                 else:
-                    logger.warning(f"未知的增强算法: {enhance_algorithm}，使用高级增强")
                     processed = self.enhance_advanced(upscaled)
             else:
-                logger.warning(f"未知的处理模式: {mode}，返回原图")
                 processed = img
             
             new_h, new_w = processed.shape[:2]
@@ -252,12 +276,9 @@ class ImageHDEnhancer:
         logger.info("=== QSY 图片高清化工具 ===")
         logger.info(f"输入文件夹: {self.input_folder}")
         logger.info(f"输出文件夹: {self.output_folder}")
-        logger.info(f"配置文件: {self.config_file}")
         logger.info(f"放大倍数: {self.config['upscale_factor']}x")
         logger.info(f"增强模式: {self.config['enhancement_mode']}")
         logger.info(f"保存质量: {self.config['save_quality']}")
-        logger.info(f"放大算法: {self.config['algorithms']['upscale']}")
-        logger.info(f"增强算法: {self.config['algorithms']['enhance']}")
         logger.info("-" * 50)
         
         # 统计文件数量
@@ -324,48 +345,32 @@ def main():
                        help='输出文件夹路径 (默认: output_images/)')
     parser.add_argument('--config', type=str, default='hd_config.json', 
                        help='配置文件路径 (默认: hd_config.json)')
-    parser.add_argument('--factor', type=int, 
-                       help='放大倍数 (覆盖配置文件中的设置)')
-    parser.add_argument('--mode', choices=['upscale', 'enhance', 'all'], 
-                       help='处理模式: upscale(仅放大), enhance(仅增强), all(放大+增强) (覆盖配置文件中的设置)')
-    parser.add_argument('--quality', type=int, 
-                       help='保存质量 1-100 (覆盖配置文件中的设置)')
+    parser.add_argument('--factor', type=int, default=2, 
+                       help='放大倍数 (默认: 2)')
+    parser.add_argument('--mode', choices=['upscale', 'enhance', 'all'], default='all', 
+                       help='处理模式: upscale(仅放大), enhance(仅增强), all(放大+增强)')
+    parser.add_argument('--quality', type=int, default=95, 
+                       help='保存质量 1-100 (默认: 95)')
     
     args = parser.parse_args()
     
-    try:
-        # 创建增强器实例
-        enhancer = ImageHDEnhancer(
-            input_folder=args.input,
-            output_folder=args.output,
-            config_file=args.config
-        )
-        
-        # 如果命令行参数提供了值，则覆盖配置文件中的设置
-        if args.factor is not None:
-            enhancer.config['upscale_factor'] = args.factor
-            logger.info(f"命令行覆盖放大倍数: {args.factor}")
-        
-        if args.mode is not None:
-            enhancer.config['enhancement_mode'] = args.mode
-            logger.info(f"命令行覆盖处理模式: {args.mode}")
-        
-        if args.quality is not None:
-            enhancer.config['save_quality'] = max(1, min(100, args.quality))
-            logger.info(f"命令行覆盖保存质量: {enhancer.config['save_quality']}")
-        
-        # 开始处理
-        enhancer.process_all_images()
-        
-    except FileNotFoundError as e:
-        logger.error(f"配置文件错误: {e}")
-        logger.error("请确保 hd_config.json 文件存在并包含正确的配置")
-        return 1
-    except Exception as e:
-        logger.error(f"程序运行错误: {e}")
-        return 1
+    # 创建增强器实例
+    enhancer = ImageHDEnhancer(
+        input_folder=args.input,
+        output_folder=args.output,
+        config_file=args.config
+    )
     
-    return 0
+    # 更新配置
+    enhancer.config['upscale_factor'] = args.factor
+    enhancer.config['enhancement_mode'] = args.mode
+    enhancer.config['save_quality'] = max(1, min(100, args.quality))
+    
+    # 保存更新后的配置
+    enhancer.save_config(enhancer.config)
+    
+    # 开始处理
+    enhancer.process_all_images()
 
 if __name__ == "__main__":
-    exit(main())
+    main()
