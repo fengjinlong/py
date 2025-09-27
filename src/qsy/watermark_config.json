@@ -1,25 +1,16 @@
 {
   "description": "水印区域配置文件",
   "watermarks": [
-    {
-      "name": "右下角水印1",
-      "coordinates": [2648, 1360, 2766, 1480],
-      "enabled": true
-    },
+   
     {
       "name": "水印点2",
-      "coordinates": [17, 21, 177, 82],
+      "coordinates": [20, 20, 177, 83],
       "enabled": true
     },
     {
       "name": "水印点3",
-      "coordinates": [714, 1581, 913, 1637],
+      "coordinates": [1289, 813, 1646, 908],
       "enabled": true
-    },
-    {
-      "name": "自定义水印点",
-      "coordinates": [100, 100, 200, 200],
-      "enabled": false
     }
   ]
 }
