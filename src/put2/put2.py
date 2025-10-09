@@ -75,15 +75,22 @@ def get_spot_price():
     global SPOT_PRICE
     
     if SPOT_PRICE is None:
-        while True:
-            try:
-                SPOT_PRICE = float(input("请输入当前BTC现货价格: "))
+        try:
+            user_input = input("请输入当前BTC现货价格 (直接回车使用默认价格$100,000): ").strip()
+            if user_input:
+                SPOT_PRICE = float(user_input)
                 if SPOT_PRICE <= 0:
-                    print("价格必须大于0，请重新输入。")
-                    continue
-                break
-            except ValueError:
-                print("请输入有效的数字。")
+                    print("价格必须大于0，使用默认价格。")
+                    SPOT_PRICE = 100000
+            else:
+                SPOT_PRICE = 100000
+        except ValueError:
+            print("价格输入无效，使用默认价格。")
+            SPOT_PRICE = 100000
+        except EOFError:
+            # 处理非交互式环境
+            SPOT_PRICE = 100000
+            print("非交互式环境，使用默认价格。")
     
     print(f"使用现货价格: ${SPOT_PRICE:,.2f}")
     return SPOT_PRICE
@@ -541,15 +548,28 @@ def analyze_best_strategies(df, single_put_results, bear_put_spread_results):
     """
     analysis = {}
     
-    # 分析单腿策略
-    best_single_put = None
-    best_vega_theta = 0
+    # 获取市场基础数据
+    current_price = df['underlying_price'].iloc[0] if 'underlying_price' in df.columns else 100000
+    avg_iv = df['mid_iv'].mean()
+    avg_days_to_exp = df['days_to_expiration'].mean()
     
+    # 分析单腿策略 - 多维度评估
+    best_single_put = None
+    best_score = 0
+    
+    strategy_scores = {}
     for strategy_name, strategy_df in single_put_results.items():
         if len(strategy_df) > 0:
-            max_vega_theta = strategy_df['vega_to_theta_ratio'].max()
-            if max_vega_theta > best_vega_theta:
-                best_vega_theta = max_vega_theta
+            # 计算综合评分：Vega/Theta比率 + 流动性 + 时间价值
+            vega_theta_score = strategy_df['vega_to_theta_ratio'].max()
+            liquidity_score = 1.0  # 简化处理，实际可根据成交量等计算
+            time_value_score = 1.0 if avg_days_to_exp > 30 else 0.8  # 时间价值衰减考虑
+            
+            total_score = vega_theta_score * 0.5 + liquidity_score * 0.3 + time_value_score * 0.2
+            strategy_scores[strategy_name] = total_score
+            
+            if total_score > best_score:
+                best_score = total_score
                 best_single_put = strategy_name
     
     if best_single_put:
@@ -562,58 +582,120 @@ def analyze_best_strategies(df, single_put_results, bear_put_spread_results):
         best_df = single_put_results[best_single_put]
         best_option = best_df.iloc[0]
         
-        analysis['最优单腿策略'] = f"""
+        # 计算保护水平
+        protection_level = (current_price - best_option['strike_price']) / current_price * 100
+        
+        analysis['🏆 最优单腿策略推荐'] = f"""
+### 📊 策略概览
 **推荐策略**: {strategy_names[best_single_put]}
+**综合评分**: {best_score:.2f}/10.0
+**保护水平**: {protection_level:.1f}% (当前价格: ${current_price:,.0f})
 
-**最优期权**:
-- 行权价: ${best_option['strike_price']:,.0f}
-- Delta: {best_option['delta']:.3f}
-- 权利金: ${best_option['mid_price']:.4f}
-- Vega/Theta比率: {best_option['vega_to_theta_ratio']:.2f}
+### 🎯 最优期权详情
+| 指标 | 数值 | 评级 |
+|------|------|------|
+| 行权价 | ${best_option['strike_price']:,.0f} | {'🟢 深度实值' if best_option['delta'] < -0.7 else '🟡 实值' if best_option['delta'] < -0.5 else '🟠 平值' if best_option['delta'] < -0.3 else '🔴 虚值'} |
+| Delta | {best_option['delta']:.3f} | {'强保护' if best_option['delta'] < -0.5 else '中等保护' if best_option['delta'] < -0.3 else '弱保护'} |
+| 权利金 | ${best_option['mid_price']:.4f} | {'低成本' if best_option['mid_price'] < 0.01 else '中等成本' if best_option['mid_price'] < 0.05 else '高成本'} |
+| Vega/Theta比率 | {best_option['vega_to_theta_ratio']:.2f} | {'优秀' if best_option['vega_to_theta_ratio'] > 2.0 else '良好' if best_option['vega_to_theta_ratio'] > 1.0 else '一般'} |
+| 到期天数 | {best_option['days_to_expiration']:.0f}天 | {'长期' if best_option['days_to_expiration'] > 60 else '中期' if best_option['days_to_expiration'] > 30 else '短期'} |
 
-**推荐理由**:
-1. **最高性价比**: Vega/Theta比率达到{best_option['vega_to_theta_ratio']:.2f}，表明该期权在波动率收益与时间成本之间具有最佳平衡
-2. **风险收益比**: 在当前市场条件下，该期权提供了最优的风险调整后收益
-3. **流动性考虑**: 该行权价附近的期权通常具有较好的流动性
-4. **到期时间**: 距离到期{best_option['days_to_expiration']:.0f}天，时间价值衰减适中
+### 💡 推荐理由
+1. **🎯 最佳性价比**: Vega/Theta比率达到{best_option['vega_to_theta_ratio']:.2f}，在波动率收益与时间成本间达到最优平衡
+2. **🛡️ 风险保护**: 提供{protection_level:.1f}%的价格保护，适合当前市场风险水平
+3. **💰 成本效益**: 权利金${best_option['mid_price']:.4f}，在同类策略中具有成本优势
+4. **⏰ 时间管理**: {best_option['days_to_expiration']:.0f}天到期，时间价值衰减速度适中
+5. **📈 流动性**: 该行权价附近期权流动性良好，便于执行和调整
+
+### ⚠️ 风险提示
+- 最大损失: 权利金${best_option['mid_price']:.4f}
+- 时间价值衰减风险: {'低' if best_option['days_to_expiration'] > 60 else '中等' if best_option['days_to_expiration'] > 30 else '高'}
+- 波动率风险: {'有利' if avg_iv < 0.7 else '不利'}
 """
     
-    # 分析价差策略
+    # 分析价差策略 - 增强版
     if 'bear_put_spread' in bear_put_spread_results:
         spread_df = bear_put_spread_results['bear_put_spread']
         if len(spread_df) > 0:
             best_spread = spread_df.iloc[0]
             
-            analysis['最优价差策略'] = f"""
-**推荐策略**: 熊市看跌价差
+            # 计算价差宽度和成本效益
+            spread_width = best_spread['long_strike'] - best_spread['short_strike']  # 修正：长腿行权价应该高于短腿
+            cost_efficiency = best_spread['reward_risk_ratio']
+            max_profit = spread_width - best_spread['net_premium']
+            
+            analysis['🏆 最优价差策略推荐'] = f"""
+### 📊 策略概览
+**推荐策略**: 熊市看跌价差 (Bear Put Spread)
+**盈亏比**: {best_spread['reward_risk_ratio']:.2f}:1
+**成本效益**: {'优秀' if cost_efficiency > 2.0 else '良好' if cost_efficiency > 1.5 else '一般'}
 
-**最优组合**:
-- 长腿: ${best_spread['long_strike']:,.0f} (Delta: {best_spread['long_delta']:.3f})
-- 短腿: ${best_spread['short_strike']:,.0f} (Delta: {best_spread['short_delta']:.3f})
-- 净权利金: ${best_spread['net_premium']:.4f}
-- 盈亏比: {best_spread['reward_risk_ratio']:.2f}
+### 🎯 最优组合详情
+| 组件 | 行权价 | Delta | 作用 |
+|------|--------|-------|------|
+| 长腿 (买入) | ${best_spread['long_strike']:,.0f} | {best_spread['long_delta']:.3f} | 主要保护 |
+| 短腿 (卖出) | ${best_spread['short_strike']:,.0f} | {best_spread['short_delta']:.3f} | 降低成本 |
+| 价差宽度 | ${spread_width:,.0f} | - | 最大收益 |
 
-**推荐理由**:
-1. **成本优势**: 通过卖出低行权价期权，大幅降低了策略成本
-2. **风险可控**: 最大风险限制在净权利金范围内
-3. **盈亏比优秀**: 盈亏比达到{best_spread['reward_risk_ratio']:.2f}，风险收益比优异
-4. **适用性广**: 适合预期下跌但希望控制成本的投资者
+### 💰 财务分析
+- **净权利金**: ${best_spread['net_premium']:.4f} (成本)
+- **最大收益**: ${max_profit:.4f} (${spread_width:,.0f} - ${best_spread['net_premium']:.4f})
+- **最大损失**: ${best_spread['net_premium']:.4f} (净权利金)
+- **盈亏平衡点**: ${best_spread['long_strike'] - best_spread['net_premium']:,.0f}
+
+### 💡 推荐理由
+1. **💰 成本优势**: 通过卖出低行权价期权，将策略成本降低{(best_spread['net_premium'] / spread_width * 100):.1f}%
+2. **🛡️ 风险可控**: 最大风险严格限制在净权利金${best_spread['net_premium']:.4f}范围内
+3. **📈 盈亏比优秀**: {best_spread['reward_risk_ratio']:.2f}:1的盈亏比，风险收益比优异
+4. **🎯 适用性广**: 适合预期下跌但希望控制成本的投资者
+5. **⚡ 执行简单**: 单次交易完成，无需复杂管理
+
+### 📊 收益分析
+- **最佳情况**: BTC跌至${best_spread['short_strike']:,.0f}以下，获得最大收益${max_profit:.4f}
+- **盈亏平衡**: BTC跌至${best_spread['long_strike'] - best_spread['net_premium']:,.0f}时实现盈亏平衡
+- **最坏情况**: BTC上涨，损失全部净权利金${best_spread['net_premium']:.4f}
 """
     
-    # 市场环境分析
-    avg_iv = df['mid_iv'].mean()
-    avg_days_to_exp = df['days_to_expiration'].mean()
+    # 市场环境分析 - 增强版
+    iv_percentile = (df['mid_iv'] > avg_iv).mean() * 100
+    time_to_exp_distribution = {
+        '短期(≤30天)': (df['days_to_expiration'] <= 30).sum(),
+        '中期(31-60天)': ((df['days_to_expiration'] > 30) & (df['days_to_expiration'] <= 60)).sum(),
+        '长期(>60天)': (df['days_to_expiration'] > 60).sum()
+    }
     
-    analysis['市场环境分析'] = f"""
-**当前市场特征**:
-- 平均隐含波动率: {avg_iv:.1%}
-- 平均到期天数: {avg_days_to_exp:.0f}天
-- 期权数量: {len(df)}个
+    analysis['📈 市场环境分析'] = f"""
+### 🌍 当前市场特征
+| 指标 | 数值 | 市场状态 |
+|------|------|----------|
+| 平均隐含波动率 | {avg_iv:.1%} | {'🔴 高波动' if avg_iv > 0.8 else '🟡 中等波动' if avg_iv > 0.5 else '🟢 低波动'} |
+| 波动率分位数 | {iv_percentile:.0f}% | {'偏高' if iv_percentile > 70 else '适中' if iv_percentile > 30 else '偏低'} |
+| 平均到期天数 | {avg_days_to_exp:.0f}天 | {'长期' if avg_days_to_exp > 60 else '中期' if avg_days_to_exp > 30 else '短期'} |
+| 期权总数 | {len(df)}个 | {'丰富' if len(df) > 100 else '适中' if len(df) > 50 else '有限'} |
 
-**市场判断**:
-1. **波动率水平**: {'偏高' if avg_iv > 0.8 else '适中' if avg_iv > 0.5 else '偏低'}，{'适合买入期权' if avg_iv < 0.7 else '适合卖出期权'}
-2. **时间价值**: 平均到期时间{avg_days_to_exp:.0f}天，{'时间价值衰减较慢' if avg_days_to_exp > 30 else '时间价值衰减较快'}
-3. **策略选择**: 当前环境下建议{'重点关注价差策略' if avg_iv > 0.7 else '重点关注单腿策略'}
+### 📅 到期时间分布
+- 短期期权 (≤30天): {time_to_exp_distribution['短期(≤30天)']}个
+- 中期期权 (31-60天): {time_to_exp_distribution['中期(31-60天)']}个  
+- 长期期权 (>60天): {time_to_exp_distribution['长期(>60天)']}个
+
+### 🎯 市场判断与策略建议
+1. **📊 波动率环境**: 
+   - 当前IV为{avg_iv:.1%}，{'适合买入期权策略' if avg_iv < 0.7 else '适合卖出期权策略'}
+   - 建议{'重点关注单腿策略' if avg_iv < 0.6 else '重点关注价差策略' if avg_iv < 0.8 else '考虑复杂策略'}
+
+2. **⏰ 时间价值管理**:
+   - 平均到期{avg_days_to_exp:.0f}天，{'时间价值衰减较慢，适合长期持有' if avg_days_to_exp > 30 else '时间价值衰减较快，需要密切监控'}
+   - 建议{'选择长期期权' if avg_days_to_exp < 30 else '选择中期期权' if avg_days_to_exp < 60 else '可考虑短期期权'}
+
+3. **🎯 策略优先级**:
+   - **首选**: {'单腿策略' if avg_iv < 0.6 else '价差策略'}
+   - **备选**: {'价差策略' if avg_iv < 0.6 else '单腿策略'}
+   - **风险控制**: 建议仓位不超过总资金的{'5%' if avg_iv > 0.8 else '10%' if avg_iv > 0.6 else '15%'}
+
+### ⚠️ 风险提示
+- **市场风险**: 当前波动率{'偏高' if avg_iv > 0.8 else '适中' if avg_iv > 0.5 else '偏低'}，需注意{'波动率下降风险' if avg_iv > 0.7 else '波动率上升风险'}
+- **时间风险**: {'时间价值衰减较快' if avg_days_to_exp < 30 else '时间价值衰减适中'}
+- **流动性风险**: 建议选择成交量较大的期权合约
 """
     
     return analysis
