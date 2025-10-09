@@ -343,6 +343,19 @@ def analyze_bear_put_spread(df, config):
                 breakeven = long_leg['strike_price'] - net_premium
                 reward_risk_ratio = max_profit / max_risk if max_risk > 0 else 0
                 
+                # 计算赔率 (基于Delta值估算成功概率)
+                # 长腿Delta的绝对值表示期权在到期时处于实值状态的概率
+                long_leg_prob = abs(long_leg['delta'])
+                short_leg_prob = abs(short_leg['delta'])
+                
+                # 价差策略成功概率：长腿实值且短腿虚值的概率
+                # 简化计算：使用长腿Delta作为基础成功概率
+                success_prob = long_leg_prob
+                failure_prob = 1 - success_prob
+                
+                # 赔率 = 失败概率 / 成功概率
+                odds = failure_prob / success_prob if success_prob > 0 else 0
+                
                 spread_data = {
                     'long_strike': long_leg['strike_price'],
                     'short_strike': short_leg['strike_price'],
@@ -355,6 +368,9 @@ def analyze_bear_put_spread(df, config):
                     'max_profit': max_profit,
                     'breakeven': breakeven,
                     'reward_risk_ratio': reward_risk_ratio,
+                    'success_prob': success_prob,
+                    'failure_prob': failure_prob,
+                    'odds': odds,
                     'expiration_date': long_leg['expiration_date']
                 }
                 
@@ -423,7 +439,8 @@ def generate_report(df, single_put_results, bear_put_spread_results):
                     print(f"  {i}. 长腿: ${row['long_strike']:,.0f}, "
                           f"短腿: ${row['short_strike']:,.0f}, "
                           f"净权利金: ${row['net_premium']:.4f}, "
-                          f"盈亏比: {row['reward_risk_ratio']:.2f}")
+                          f"盈亏比: {row['reward_risk_ratio']:.2f}, "
+                          f"赔率: {row['odds']:.2f}:1 (成功概率: {row['success_prob']:.1%})")
     
     # 生成综合报告文档
     generate_comprehensive_report(df, single_put_results, bear_put_spread_results)
@@ -631,6 +648,7 @@ def analyze_best_strategies(df, single_put_results, bear_put_spread_results):
 ### 📊 策略概览
 **推荐策略**: 熊市看跌价差 (Bear Put Spread)
 **盈亏比**: {best_spread['reward_risk_ratio']:.2f}:1
+**赔率**: {best_spread['odds']:.2f}:1 (成功概率: {best_spread['success_prob']:.1%})
 **成本效益**: {'优秀' if cost_efficiency > 2.0 else '良好' if cost_efficiency > 1.5 else '一般'}
 
 ### 🎯 最优组合详情
@@ -646,12 +664,19 @@ def analyze_best_strategies(df, single_put_results, bear_put_spread_results):
 - **最大损失**: ${best_spread['net_premium']:.4f} (净权利金)
 - **盈亏平衡点**: ${best_spread['long_strike'] - best_spread['net_premium']:,.0f}
 
+### 🎲 概率分析
+- **成功概率**: {best_spread['success_prob']:.1%} (基于长腿Delta)
+- **失败概率**: {best_spread['failure_prob']:.1%}
+- **赔率**: {best_spread['odds']:.2f}:1 (失败概率/成功概率)
+- **期望收益**: ${max_profit * best_spread['success_prob'] - best_spread['net_premium'] * best_spread['failure_prob']:.4f}
+
 ### 💡 推荐理由
 1. **💰 成本优势**: 通过卖出低行权价期权，将策略成本降低{(best_spread['net_premium'] / spread_width * 100):.1f}%
 2. **🛡️ 风险可控**: 最大风险严格限制在净权利金${best_spread['net_premium']:.4f}范围内
 3. **📈 盈亏比优秀**: {best_spread['reward_risk_ratio']:.2f}:1的盈亏比，风险收益比优异
-4. **🎯 适用性广**: 适合预期下跌但希望控制成本的投资者
-5. **⚡ 执行简单**: 单次交易完成，无需复杂管理
+4. **🎲 概率合理**: {best_spread['success_prob']:.1%}的成功概率，赔率{best_spread['odds']:.2f}:1，风险收益匹配
+5. **🎯 适用性广**: 适合预期下跌但希望控制成本的投资者
+6. **⚡ 执行简单**: 单次交易完成，无需复杂管理
 
 ### 📊 收益分析
 - **最佳情况**: BTC跌至${best_spread['short_strike']:,.0f}以下，获得最大收益${max_profit:.4f}
