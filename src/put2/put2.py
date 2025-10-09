@@ -225,6 +225,9 @@ def calculate_auxiliary_columns(df):
     """
     计算辅助列
     """
+    # 添加标的现货价格列
+    df['underlying_price'] = SPOT_PRICE
+    
     # 中间价格（币本位统计，需要乘以标的价格）
     df['mid_price'] = (df['bid_price'] + df['ask_price']) / 2 * SPOT_PRICE
     
