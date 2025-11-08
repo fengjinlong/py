@@ -7,64 +7,6 @@ import os
 import glob
 import sys
 
-def _infer_premium_columns(df: pd.DataFrame):
-    """在常见列名中推断期权权利金（Premium）。返回(series, name)或(None, None)。
-    优先使用中间价 (bid/ask)，否则退化为单列价格。
-    """
-    # 常见买卖价列名集合
-    bid_candidates = [
-        "Bid", "bid", "买价", "买一价", "买盘价"
-    ]
-    ask_candidates = [
-        "Ask", "ask", "卖价", "卖一价", "卖盘价"
-    ]
-    price_candidates = [
-        "价格", "最新价", "Last Price", "Mark Price", "标记价格", "期权价格", "Option Price", "收盘价"
-    ]
-
-    bid_col = next((c for c in bid_candidates if c in df.columns), None)
-    ask_col = next((c for c in ask_candidates if c in df.columns), None)
-    if bid_col and ask_col:
-        mid = (pd.to_numeric(df[bid_col], errors="coerce") + pd.to_numeric(df[ask_col], errors="coerce")) / 2.0
-        return mid, f"mid({bid_col}/{ask_col})"
-
-    price_col = next((c for c in price_candidates if c in df.columns), None)
-    if price_col:
-        price = pd.to_numeric(df[price_col], errors="coerce")
-        return price, price_col
-
-    return None, None
-
-def _infer_spot_price(df: pd.DataFrame):
-    """在常见列名中推断标的现价S，不存在时用近似ATM行权价估算。
-    近似策略：在 |Delta| 最接近 0.5 的行取其 Strike；若失败则用 Strike 中位数。
-    """
-    spot_candidates = [
-        "Underlying", "Underlying Price", "Spot", "Index Price", "标的价格", "现货价", "S"
-    ]
-    for col in spot_candidates:
-        if col in df.columns:
-            s = pd.to_numeric(df[col], errors="coerce").median()
-            if pd.notna(s) and s > 0:
-                return float(s), col
-
-    try:
-        # 以 |Delta-0.5| 最小点的 Strike 近似 S
-        if "Δ|增量" in df.columns and "Strike" in df.columns:
-            idx = (df["Δ|增量"].abs() - 0.5).abs().idxmin()
-            s_est = float(df.loc[idx, "Strike"]) if pd.notna(df.loc[idx, "Strike"]) else None
-            if s_est and s_est > 0:
-                return s_est, "approx_from_Delta~0.5"
-    except Exception:
-        pass
-
-    # 兜底：使用行权价中位数
-    if "Strike" in df.columns and len(df["Strike"]) > 0:
-        med = float(pd.to_numeric(df["Strike"], errors="coerce").median())
-        if pd.notna(med) and med > 0:
-            return med, "median_strike"
-    return None, None
-
 def find_csv_files(data_dir="data"):
     """查找data目录下的所有CSV文件"""
     if not os.path.exists(data_dir):
@@ -121,111 +63,14 @@ def process_single_file(file_path):
         df["Delta/Theta"] = df["Δ|增量"] / df["Theta"].abs()
         df["Gamma/Theta"] = df["Gamma"] / df["Theta"].abs()
         df["Vega/Theta"] = df["Vega"] / df["Theta"].abs()
-
-        # 4.1 推断权利金与现货价，计算 Leverage 与复合评分
-        premium_series, premium_name = _infer_premium_columns(df)
-        spot_price, spot_src = _infer_spot_price(df)
-        if premium_series is not None:
-            df["Premium"] = premium_series
-        else:
-            df["Premium"] = np.nan
-        df["Spot"] = spot_price if spot_price is not None else np.nan
-
-        # Leverage = Delta * S / Premium（仅当 Premium 与 S 都可用且 >0）
-        def _calc_leverage(row):
-            try:
-                if pd.notna(row["Premium"]) and row["Premium"] > 0 and pd.notna(row["Spot"]) and row["Spot"] > 0:
-                    return (abs(row["Δ|增量"])) * row["Spot"] / row["Premium"]
-            except Exception:
-                return np.nan
-            return np.nan
-        df["Leverage"] = df.apply(_calc_leverage, axis=1)
-
-        # 复合评分：默认权重均等，可通过环境变量调整（例如强势看涨提升 w2、w4）
-        w1 = float(os.getenv("W_GAMMA_THETA", "0.25"))
-        w2 = float(os.getenv("W_DELTA_THETA", "0.25"))
-        w3 = float(os.getenv("W_VEGA_THETA", "0.25"))
-        w4 = float(os.getenv("W_LEVERAGE", "0.25"))
-        # 可选归一化，避免单一尺度主导导致权重失效（默认启用）
-        def _min_max_clip(s: pd.Series):
-            s = pd.to_numeric(s, errors="coerce").replace([np.inf, -np.inf], np.nan)
-            if s.notna().sum() == 0:
-                return pd.Series(0.0, index=s.index)
-            lo = np.nanpercentile(s, 5)
-            hi = np.nanpercentile(s, 95)
-            s = s.clip(lower=lo, upper=hi)
-            mn = np.nanmin(s.values)
-            mx = np.nanmax(s.values)
-            if not np.isfinite(mn) or not np.isfinite(mx) or mx == mn:
-                return pd.Series(0.0, index=s.index)
-            return (s - mn) / (mx - mn)
-
-        use_norm = os.getenv("NORMALIZE_FOR_SCORE", "1") == "1"
-        if use_norm:
-            g_norm = _min_max_clip(df["Gamma/Theta"]).fillna(0.0)
-            d_norm = _min_max_clip(df["Delta/Theta"]).fillna(0.0)
-            v_norm = _min_max_clip(df["Vega/Theta"]).fillna(0.0)
-            l_norm = _min_max_clip(df["Leverage"]).fillna(0.0)
-            df["Score"] = w1 * g_norm + w2 * d_norm + w3 * v_norm + w4 * l_norm
-        else:
-            df["Score"] = (
-                w1 * df["Gamma/Theta"].fillna(0.0)
-                + w2 * df["Delta/Theta"].fillna(0.0)
-                + w3 * df["Vega/Theta"].fillna(0.0)
-                + w4 * df["Leverage"].fillna(0.0)
-            )
-
-        # 4.2 风险调整场景：S 上涨 10% 的近似 PnL 与 ROI（泰勒展开，假设 dIV=0）
-        def _scenario_roi(row):
-            try:
-                if pd.isna(row.get("Premium", np.nan)) or row["Premium"] <= 0 or pd.isna(row.get("Spot", np.nan)):
-                    return np.nan
-                dS = 0.10 * row["Spot"]
-                delta = float(row["Δ|增量"]) if pd.notna(row["Δ|增量"]) else 0.0
-                gamma = float(row["Gamma"]) if pd.notna(row["Gamma"]) else 0.0
-                dP = delta * dS + 0.5 * gamma * (dS ** 2)
-                return dP / row["Premium"] if row["Premium"] > 0 else np.nan
-            except Exception:
-                return np.nan
-        df["ROI@S+10%"] = df.apply(_scenario_roi, axis=1)
         
         # 5. 初始化推荐列
         df["Recommendation"] = "Normal"
         
-        # 保留一个基础特征副本，供多情景复算使用
-        base_features_df = df.copy()
-
-        # 6. 定义OTM筛选条件：Delta范围筛选（原规则）
+        # 6. 定义OTM筛选条件：Delta范围筛选
         delta_min = 0.15 # 最小Delta值
         delta_max = 0.45   # 最大Delta值
         otm_condition = (df["Δ|增量"].abs() >= delta_min) & (df["Δ|增量"].abs() <= delta_max)
-
-        # 6.1 初筛阶段：希腊效率阈值 + ATM~轻度OTM (K ∈ [S, 1.1S])
-        vega_theta_threshold = float(os.getenv("THRESH_VEGA_THETA", "1.2"))
-        gamma_theta_threshold = float(os.getenv("THRESH_GAMMA_THETA", "0.0015"))
-        delta_theta_threshold = float(os.getenv("THRESH_DELTA_THETA", "0.03"))
-
-        base_screen = (
-            (df["Vega/Theta"] > vega_theta_threshold)
-            & (df["Gamma/Theta"] > gamma_theta_threshold)
-            & (df["Delta/Theta"] > delta_theta_threshold)
-        )
-        if pd.notna(spot_price):
-            atm_light_otm = (df["Strike"] >= spot_price) & (df["Strike"] <= 1.1 * spot_price)
-        else:
-            atm_light_otm = pd.Series([True] * len(df), index=df.index)  # 无 S 时不加此限制
-        initial_screen = base_screen & atm_light_otm
-        df["InitialScreen"] = initial_screen
-
-        # 6.2 优化阶段：引入 Leverage（优先 8~15 区间）
-        leverage_off = os.getenv("THRESH_LEVERAGE_OFF", "0") == "1"
-        leverage_min = float(os.getenv("THRESH_LEVERAGE_MIN", "8"))
-        leverage_max = float(os.getenv("THRESH_LEVERAGE_MAX", "15"))
-        if leverage_off:
-            leverage_mask = pd.Series([True] * len(df), index=df.index)
-        else:
-            leverage_mask = df["Leverage"].between(leverage_min, leverage_max, inclusive="both")
-        df["OptimizedScreen"] = initial_screen & leverage_mask
         
         print(f"OTM筛选条件: {delta_min} ≤ |Delta| ≤ {delta_max}")
         print(f"符合OTM条件的合约数量: {otm_condition.sum()}")
@@ -233,7 +78,6 @@ def process_single_file(file_path):
         
         # 标记前 3 名 (Delta/Theta) - 仅在OTM范围内筛选
         otm_df = df[otm_condition].copy()
-        screened_df = df[df["OptimizedScreen"]].copy()
         if len(otm_df) >= 3:
             top3_delta = otm_df["Delta/Theta"].nlargest(3).index
             for rank, idx in enumerate(top3_delta, start=1):
@@ -263,34 +107,6 @@ def process_single_file(file_path):
         else:
             top3_vega = []
             print(f"\n警告: OTM范围内合约数量不足3个，无法筛选Vega/Theta")
-
-        # 标记前 3 名 (Score) - 在优化筛选集合内
-        if len(screened_df) >= 3:
-            top3_score = screened_df["Score"].nlargest(3).index
-            for rank, idx in enumerate(top3_score, start=1):
-                if df.loc[idx, "Recommendation"] == "Normal":
-                    df.loc[idx, "Recommendation"] = f"Top{rank} (Score)"
-                else:
-                    df.loc[idx, "Recommendation"] += f" + Top{rank} (Score)"
-            print(f"\n前3名综合评分 (优化筛选内): {len(top3_score)}个")
-        else:
-            top3_score = []
-            print(f"\n警告: 优化筛选集合内数量不足3个 ({len(screened_df)}个)")
-
-        # 6.3 综合Top排名：在 OptimizedScreen 内按 Score 降序，其次 ROI@S+10%、Leverage
-        df["TopRank"] = ""
-        rank_pool = df[df["OptimizedScreen"]].copy()
-        if len(rank_pool) < 3:
-            # 退化：使用 InitialScreen；再退化：使用全量
-            rank_pool = df[df["InitialScreen"]].copy() if df["InitialScreen"].sum() >= 3 else df.copy()
-        try:
-            rank_pool_sorted = rank_pool.sort_values(["Score", "ROI@S+10%", "Leverage"], ascending=[False, False, False])
-            top_idx = list(rank_pool_sorted.head(3).index)
-            for i, idx in enumerate(top_idx, start=1):
-                df.loc[idx, "TopRank"] = f"Top{i}"
-            print(f"综合排名 Top1-Top3 已生成（优先 OptimizedScreen，按 Score→ROI→Leverage）。")
-        except Exception:
-            print("警告：综合排名计算失败。")
         
         # 7. 打印推荐结果
         if len(top3_delta) > 0:
@@ -314,136 +130,6 @@ def process_single_file(file_path):
         # 9. 生成Excel和CSV文件
         generate_output_files(df, top3_delta, top3_gamma, top3_vega, base_name, export_dir)
         
-        # 9.1 三种预设情景复算并汇总到一个CSV
-        def run_scenario(preset_name, w_gamma, w_delta, w_vega, w_lev,
-                         lev_off=None, lev_min=None, lev_max=None,
-                         vega_th=None, gamma_th=None, delta_th=None):
-            s_df = base_features_df.copy()
-            # 重算 Score（按需归一化）
-            use_norm_local = os.getenv("NORMALIZE_FOR_SCORE", "1") == "1"
-            if use_norm_local:
-                def _mm(s: pd.Series):
-                    s = pd.to_numeric(s, errors="coerce").replace([np.inf, -np.inf], np.nan)
-                    if s.notna().sum() == 0:
-                        return pd.Series(0.0, index=s.index)
-                    lo = np.nanpercentile(s, 5)
-                    hi = np.nanpercentile(s, 95)
-                    s = s.clip(lower=lo, upper=hi)
-                    mn = np.nanmin(s.values)
-                    mx = np.nanmax(s.values)
-                    if not np.isfinite(mn) or not np.isfinite(mx) or mx == mn:
-                        return pd.Series(0.0, index=s.index)
-                    return (s - mn) / (mx - mn)
-                g = _mm(s_df["Gamma/Theta"]).fillna(0.0)
-                d = _mm(s_df["Delta/Theta"]).fillna(0.0)
-                v = _mm(s_df["Vega/Theta"]).fillna(0.0)
-                l = _mm(s_df["Leverage"]).fillna(0.0)
-                s_df["Score"] = (
-                    float(w_gamma) * g + float(w_delta) * d + float(w_vega) * v + float(w_lev) * l
-                )
-            else:
-                s_df["Score"] = (
-                    float(w_gamma) * s_df["Gamma/Theta"].fillna(0.0)
-                    + float(w_delta) * s_df["Delta/Theta"].fillna(0.0)
-                    + float(w_vega) * s_df["Vega/Theta"].fillna(0.0)
-                    + float(w_lev) * s_df["Leverage"].fillna(0.0)
-                )
-            # 记录权重以便排查
-            s_df["W_GammaTheta"] = float(w_gamma)
-            s_df["W_DeltaTheta"] = float(w_delta)
-            s_df["W_VegaTheta"] = float(w_vega)
-            s_df["W_Leverage"] = float(w_lev)
-
-            # 阈值与筛选
-            vega_thr = float(vega_th if vega_th is not None else os.getenv("THRESH_VEGA_THETA", "1.2"))
-            gamma_thr = float(gamma_th if gamma_th is not None else os.getenv("THRESH_GAMMA_THETA", "0.0015"))
-            delta_thr = float(delta_th if delta_th is not None else os.getenv("THRESH_DELTA_THETA", "0.03"))
-
-            base_scr = (
-                (s_df["Vega/Theta"] > vega_thr)
-                & (s_df["Gamma/Theta"] > gamma_thr)
-                & (s_df["Delta/Theta"] > delta_thr)
-            )
-            if pd.notna(spot_price):
-                atm_otm = (s_df["Strike"] >= spot_price) & (s_df["Strike"] <= 1.1 * spot_price)
-            else:
-                atm_otm = pd.Series([True] * len(s_df), index=s_df.index)
-            s_df["InitialScreen"] = base_scr & atm_otm
-
-            # 杠杆筛选
-            lev_off_flag = (str(lev_off) == "1") if lev_off is not None else (os.getenv("THRESH_LEVERAGE_OFF", "0") == "1")
-            lmin = float(lev_min if lev_min is not None else os.getenv("THRESH_LEVERAGE_MIN", "8"))
-            lmax = float(lev_max if lev_max is not None else os.getenv("THRESH_LEVERAGE_MAX", "15"))
-            if lev_off_flag:
-                lev_mask = pd.Series([True] * len(s_df), index=s_df.index)
-            else:
-                lev_mask = s_df["Leverage"].between(lmin, lmax, inclusive="both")
-            s_df["OptimizedScreen"] = s_df["InitialScreen"] & lev_mask
-
-            # OTM 条件
-            otm_mask = (s_df["Δ|增量"].abs() >= delta_min) & (s_df["Δ|增量"].abs() <= delta_max)
-
-            # 生成 Recommendation（复用现有策略）
-            s_df["Recommendation"] = "Normal"
-
-            otm_df_local = s_df[otm_mask].copy()
-            if len(otm_df_local) >= 3:
-                for r, idx in enumerate(otm_df_local["Delta/Theta"].nlargest(3).index, start=1):
-                    s_df.loc[idx, "Recommendation"] = f"Top{r} (Delta/Theta)" if s_df.loc[idx, "Recommendation"] == "Normal" else s_df.loc[idx, "Recommendation"] + f" + Top{r} (Delta/Theta)"
-
-            for r, idx in enumerate(s_df["Gamma/Theta"].nlargest(3).index, start=1):
-                s_df.loc[idx, "Recommendation"] = f"Top{r} (Gamma/Theta)" if s_df.loc[idx, "Recommendation"] == "Normal" else s_df.loc[idx, "Recommendation"] + f" + Top{r} (Gamma/Theta)"
-
-            if len(otm_df_local) >= 3:
-                for r, idx in enumerate(otm_df_local["Vega/Theta"].nlargest(3).index, start=1):
-                    s_df.loc[idx, "Recommendation"] = f"Top{r} (Vega/Theta)" if s_df.loc[idx, "Recommendation"] == "Normal" else s_df.loc[idx, "Recommendation"] + f" + Top{r} (Vega/Theta)"
-
-            # 综合 TopRank
-            s_df["TopRank"] = ""
-            pool = s_df[s_df["OptimizedScreen"]]
-            if len(pool) < 3:
-                pool = s_df[s_df["InitialScreen"]] if s_df["InitialScreen"].sum() >= 3 else s_df
-            pool_sorted = pool.sort_values(["Score", "ROI@S+10%", "Leverage"], ascending=[False, False, False])
-            for i, idx in enumerate(list(pool_sorted.head(3).index), start=1):
-                s_df.loc[idx, "TopRank"] = f"Top{i}"
-
-            # 全局得分名次（便于比较三种情景是否改变排序）
-            s_df["RankByScore"] = s_df["Score"].rank(ascending=False, method="dense")
-
-            s_df["Scenario"] = preset_name
-            # 打印调试信息：前5名得分
-            try:
-                head5 = pool_sorted[["产品", "Strike", "Score"]].head(5)
-                print(f"[调试] 预设={preset_name} Top5 by Score:\n{head5.to_string(index=False)}")
-            except Exception:
-                pass
-            return s_df
-
-        scenario_defs = [
-            ("均衡", 0.25, 0.25, 0.25, 0.25),
-            ("强势看涨", 0.1, 0.4, 0.1, 0.4),
-            ("波动驱动", 0.3, 0.1, 0.5, 0.1),
-        ]
-
-        summary_frames = []
-        for name, wg, wd, wv, wl in scenario_defs:
-            s_df = run_scenario(name, wg, wd, wv, wl)
-            # 仅保留推荐集合
-            rec_mask = (s_df["TopRank"].isin(["Top1", "Top2", "Top3"])) | (s_df["Recommendation"] != "Normal")
-            keep_cols = [c for c in [
-                "Scenario", "TopRank", "Recommendation", "产品", "Strike",
-                "Leverage", "Score", "RankByScore", "ROI@S+10%",
-                "Delta/Theta", "Gamma/Theta", "Vega/Theta",
-                "W_GammaTheta", "W_DeltaTheta", "W_VegaTheta", "W_Leverage",
-            ] if c in s_df.columns]
-            summary_frames.append(s_df.loc[rec_mask, keep_cols])
-
-        if len(summary_frames) > 0:
-            summary_df = pd.concat(summary_frames, axis=0, ignore_index=True)
-            summary_path = os.path.join(export_dir, f"{base_name}_summary_presets.csv")
-            summary_df.to_csv(summary_path, index=False, encoding='utf-8-sig')
-            print(f"\n三种预设汇总已导出: {summary_path}")
-
         # 10. 打印统计信息
         print_statistics(file_path, df, otm_condition, delta_min, delta_max, base_name, export_dir)
         
@@ -694,18 +380,6 @@ def generate_charts(df, otm_df, top3_delta, top3_gamma, top3_vega, otm_condition
 
 def generate_output_files(df, top3_delta, top3_gamma, top3_vega, base_name, export_dir):
     """生成Excel和CSV输出文件"""
-    # 调整列顺序：将 TopRank 与 Recommendation 放前面，便于快速识别
-    preferred_cols = [
-        c for c in [
-            "TopRank", "Recommendation", "InitialScreen", "OptimizedScreen",
-            "产品", "Strike", "Δ|增量", "Gamma", "Vega", "Theta",
-            "Delta/Theta", "Gamma/Theta", "Vega/Theta", "Premium", "Spot",
-            "Leverage", "Score", "ROI@S+10%"
-        ] if c in df.columns
-    ]
-    other_cols = [c for c in df.columns if c not in preferred_cols]
-    df = df[preferred_cols + other_cols]
-
     # 创建带不同颜色标记的Excel文件
     output_file = os.path.join(export_dir, f"{base_name}_options_with_recommendation.xlsx")
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
@@ -724,10 +398,6 @@ def generate_output_files(df, top3_delta, top3_gamma, top3_vega, base_name, expo
         vega_fill = PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid")   # 粉色 - Vega/Theta
         both_fill = PatternFill(start_color="DDA0DD", end_color="DDA0DD", fill_type="solid")   # 紫色 - 两者都有
         triple_fill = PatternFill(start_color="FFD700", end_color="FFD700", fill_type="solid")  # 金色 - 三者都有
-        # Top 排名颜色（仅用于 TopRank 列单元格）
-        gold_fill = PatternFill(start_color="FFD700", end_color="FFD700", fill_type="solid")    # Top1 金
-        silver_fill = PatternFill(start_color="C0C0C0", end_color="C0C0C0", fill_type="solid")  # Top2 银
-        bronze_fill = PatternFill(start_color="CD7F32", end_color="CD7F32", fill_type="solid")  # Top3 铜
         bold_font = Font(bold=True)
         
         # 定义边框
@@ -777,22 +447,6 @@ def generate_output_files(df, top3_delta, top3_gamma, top3_vega, base_name, expo
                 cell.font = bold_font
                 cell.border = thin_border
         
-        # 为 TopRank 列添加金/银/铜高亮，仅着色该列，避免覆盖整行配色
-        if "TopRank" in df.columns:
-            top_col_idx = list(df.columns).index("TopRank") + 1
-            for row_i in range(2, len(df) + 2):
-                cell = worksheet.cell(row=row_i, column=top_col_idx)
-                if cell.value == "Top1":
-                    cell.fill = gold_fill
-                    cell.font = bold_font
-                elif cell.value == "Top2":
-                    cell.fill = silver_fill
-                    cell.font = bold_font
-                elif cell.value == "Top3":
-                    cell.fill = bronze_fill
-                    cell.font = bold_font
-                cell.border = thin_border
-
         # 为所有单元格添加边框
         for row in range(1, len(df) + 2):  # +2 因为包含标题行
             for col in range(1, len(df.columns) + 1):
@@ -827,15 +481,10 @@ def generate_output_files(df, top3_delta, top3_gamma, top3_vega, base_name, expo
     
     csv_df["颜色标记"] = csv_df["Recommendation"].apply(get_color_mark)
     
-    # 重新排列列，把 TopRank 与颜色标记放在前面
-    csv_cols = [c for c in [
-        "TopRank", "颜色标记", "Recommendation", "InitialScreen", "OptimizedScreen",
-        "产品", "Strike", "Δ|增量", "Gamma", "Vega", "Theta",
-        "Delta/Theta", "Gamma/Theta", "Vega/Theta", "Premium", "Spot",
-        "Leverage", "Score", "ROI@S+10%"
-    ] if c in csv_df.columns]
-    other_csv_cols = [c for c in csv_df.columns if c not in csv_cols]
-    csv_df = csv_df[csv_cols + other_csv_cols]
+    # 重新排列列，把颜色标记放在前面
+    cols = ["颜色标记", "产品", "Strike", "Δ|增量", "Gamma", "Vega", "Theta", 
+            "Delta/Theta", "Gamma/Theta", "Vega/Theta", "Recommendation"]
+    csv_df = csv_df[cols]
     
     # 保存CSV
     csv_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
@@ -873,120 +522,27 @@ def main():
     """主函数"""
     print("期权分析工具 - 优化版")
     print("=" * 50)
-
+    
     # 查找CSV文件
     csv_files = find_csv_files("data")
+    
     if not csv_files:
         print("没有找到CSV文件，程序退出")
         return
-
-    # 如果是交互式终端，提供菜单
-    is_tty = sys.stdin.isatty()
-    selected_files = csv_files
-
-    if is_tty:
-        print("\n数据文件列表：")
-        for i, file_path in enumerate(csv_files, 1):
-            print(f"  {i}. {os.path.basename(file_path)}")
-
-        print("\n请选择要处理的文件：")
-        print("  a) 全部文件")
-        print("  b) 按序号选择（如：1,3-5）")
-        choice = input("输入选项 (a/b，默认 a): ").strip().lower() or "a"
-
-        if choice == "b":
-            sel = input("请输入序号，逗号分隔，支持区间（示例：1,3-5）: ").strip()
-            indices = set()
-            for part in sel.split(','):
-                part = part.strip()
-                if not part:
-                    continue
-                if '-' in part:
-                    try:
-                        l, r = part.split('-')
-                        l = int(l)
-                        r = int(r)
-                        for k in range(min(l, r), max(l, r) + 1):
-                            indices.add(k)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        indices.add(int(part))
-                    except Exception:
-                        pass
-            selected_files = [csv_files[i - 1] for i in sorted(indices) if 1 <= i <= len(csv_files)]
-            if not selected_files:
-                print("未选择有效文件，默认处理全部。")
-                selected_files = csv_files
-        else:
-            selected_files = csv_files
-
-        # 预设策略
-        print("\n请选择参数预设：")
-        print("  1) 均衡 (默认)")
-        print("  2) 强势看涨（提升 Delta/Theta 与 Leverage 权重）")
-        print("  3) 波动驱动（提升 Vega/Theta 与 Gamma/Theta 权重）")
-        print("  4) 自定义权重与阈值")
-        preset = input("输入编号 (1/2/3/4，默认 1): ").strip() or "1"
-
-        def _set_env(k, v):
-            if v is not None:
-                os.environ[k] = str(v)
-
-        if preset == "2":
-            _set_env("W_DELTA_THETA", 0.4)
-            _set_env("W_LEVERAGE", 0.4)
-            _set_env("W_GAMMA_THETA", 0.1)
-            _set_env("W_VEGA_THETA", 0.1)
-        elif preset == "3":
-            _set_env("W_VEGA_THETA", 0.5)
-            _set_env("W_GAMMA_THETA", 0.3)
-            _set_env("W_DELTA_THETA", 0.1)
-            _set_env("W_LEVERAGE", 0.1)
-        elif preset == "4":
-            # 自定义权重
-            print("\n请输入权重（回车使用当前/默认值）：")
-            for key, default in [
-                ("W_GAMMA_THETA", os.getenv("W_GAMMA_THETA", "0.25")),
-                ("W_DELTA_THETA", os.getenv("W_DELTA_THETA", "0.25")),
-                ("W_VEGA_THETA", os.getenv("W_VEGA_THETA", "0.25")),
-                ("W_LEVERAGE", os.getenv("W_LEVERAGE", "0.25")),
-            ]:
-                val = input(f"{key} = [{default}]: ").strip()
-                if val:
-                    _set_env(key, val)
-
-            print("\n请输入阈值（回车使用当前/默认值）：")
-            for key, default in [
-                ("THRESH_VEGA_THETA", os.getenv("THRESH_VEGA_THETA", "1.2")),
-                ("THRESH_GAMMA_THETA", os.getenv("THRESH_GAMMA_THETA", "0.0015")),
-                ("THRESH_DELTA_THETA", os.getenv("THRESH_DELTA_THETA", "0.03")),
-                ("THRESH_LEVERAGE_MIN", os.getenv("THRESH_LEVERAGE_MIN", "8")),
-                ("THRESH_LEVERAGE_MAX", os.getenv("THRESH_LEVERAGE_MAX", "15")),
-            ]:
-                val = input(f"{key} = [{default}]: ").strip()
-                if val:
-                    _set_env(key, val)
-
-        # 杠杆筛选开关
-        lev_on = input("\n是否启用杠杆筛选区间(默认是，输入 n 关闭)? ").strip().lower()
-        if lev_on == 'n':
-            _set_env("THRESH_LEVERAGE_OFF", 1)
-        else:
-            _set_env("THRESH_LEVERAGE_OFF", 0)
-
-        print("\n开始处理...\n")
-
-    # 处理选定文件
+    
+    print(f"找到 {len(csv_files)} 个CSV文件:")
+    for i, file_path in enumerate(csv_files, 1):
+        print(f"  {i}. {os.path.basename(file_path)}")
+    
+    # 处理每个文件
     processed_count = 0
-    for file_path in selected_files:
+    for file_path in csv_files:
         result = process_single_file(file_path)
         if result is not None:
             processed_count += 1
-
+    
     print(f"\n{'='*60}")
-    print(f"处理完成！成功处理 {processed_count}/{len(selected_files)} 个文件")
+    print(f"处理完成！成功处理 {processed_count}/{len(csv_files)} 个文件")
     print(f"{'='*60}")
 
 if __name__ == "__main__":
